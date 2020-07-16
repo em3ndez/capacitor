@@ -9,6 +9,22 @@ on:
       - '**'
 
 jobs:
+  lint:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - run: brew install swiftlint
+      - uses: actions/setup-node@v1
+        with:
+          node-version: 14.x
+      - uses: actions/checkout@v2
+      - name: Restore Dependency Cache
+        uses: actions/cache@v1
+        with:
+          path: ~/.npm
+          key: ${{ runner.OS }}-dependency-cache-${{ hashFiles('**/package.json') }}
+      - run: npm install
+      - run: npm run lint
   test-cli:
     runs-on: macos-latest
     timeout-minutes: 30
@@ -27,7 +43,6 @@ jobs:
           key: ${{ runner.OS }}-dependency-cache-${{ hashFiles('**/package.json') }}
       - run: npm install
       - run: npm run build
-      - run: npm run lint
       - run: npm test
   test-core:
     runs-on: ubuntu-latest
@@ -47,7 +62,6 @@ jobs:
           key: ${{ runner.OS }}-dependency-cache-${{ hashFiles('**/package.json') }}
       - run: npm install
       - run: npm run build
-      - run: npm run lint
       - run: npm test
   test-ios:
     runs-on: macos-latest

@@ -35,8 +35,6 @@ To create a code reproduction:
 Before working on Capacitor, it's important to understand the philosophy behind the project to avoid investing time in things that won't fit into the goals of the project.
 
 Please read [@maxlynch](http://twitter.com/maxlynch)'s essay [How Capacitor Works](https://tinyletter.com/ionic-max/letters/how-capacitor-works) for a deep dive into the project and its goals.
-1. Check out this repository.
-2. Read and follow [`example/README.md`](../example/README.md)
 
 ### Consult with the team
 
@@ -50,6 +48,27 @@ On native, that means avoid adding any new Cocoapod or Gradle dependencies witho
 
 On web, this means do not add any third party libraries such as Firebase or Lodash. Strive for implementations that use pure Web APIs even if it means more work.
 
+### Local Setup
+
+1. Fork and clone the repo.
+1. Install the monorepo dependencies.
+
+    ```shell
+    npm install
+    ```
+
+1. Install SwiftLint if you're on macOS. Contributions to iOS code will be linted in CI if you don't have macOS.
+
+    ```shell
+    brew install swiftlint
+    ```
+
+1. Install package dependencies. [Lerna](https://github.com/lerna/lerna) can automatically install each package's dependencies.
+
+    ```shell
+    npx lerna bootstrap
+    ```
+
 ### Directory Structure
 
 The `ionic-team/capacitor` repo is a monorepo containing all of the standard Capacitor components. The current directory structure looks like this:
@@ -61,7 +80,6 @@ The `ionic-team/capacitor` repo is a monorepo containing all of the standard Cap
 * `ios-template`: Default iOS App installed by the CLI
 * `android`: Capacitor Android Runtime
 * `android-template`: Default Android App installed by the CLI
-* `example`: Example project for development
 * `plugin-template`: The default plugin template when creating a new plugin
 * `scripts`: publish and task scripts
 

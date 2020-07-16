@@ -7,7 +7,7 @@ enum BridgeError: Error {
   case errorExportingCoreJS
 }
 
-@objc public class CAPBridge : NSObject {
+@objc public class CAPBridge: NSObject {
 
   var tmpWindow: UIWindow?
   @objc public static let statusBarTappedNotification = Notification(name: Notification.Name(rawValue: "statusBarTappedNotification"))
@@ -18,26 +18,26 @@ enum BridgeError: Error {
 
   // The last URL that caused the app to open
   private static var lastUrl: URL?
-  
-  public var userContentController: WKUserContentController
-  public var bridgeDelegate: CAPBridgeDelegate
-  @objc public var viewController: UIViewController {
-    return bridgeDelegate.bridgedViewController!
+
+  public var messageHandlerWrapper: CAPMessageHandlerWrapper
+  public weak var bridgeDelegate: CAPBridgeDelegate?
+  @objc public var viewController: UIViewController? {
+    return bridgeDelegate?.bridgedViewController
   }
-  
+
   private var localUrl: String?
 
   public var lastPlugin: CAPPlugin?
-  
+
   @objc public var config: CAPConfig
   // Map of all loaded and instantiated plugins by pluginId -> instance
-  public var plugins =  [String:CAPPlugin]()
+  public var plugins =  [String: CAPPlugin]()
   // List of known plugins by pluginId -> Plugin Type
-  public var knownPlugins = [String:CAPPlugin.Type]()
+  public var knownPlugins = [String: CAPPlugin.Type]()
   // Manager for getting Cordova plugins
   public var cordovaPluginManager: CDVPluginManager?
   // Calls we are storing to resolve later
-  public var storedCalls = [String:CAPPluginCall]()
+  public var storedCalls = [String: CAPPluginCall]()
   // Scheme to use when serving content
   public var scheme: String
   // Whether the app is active
@@ -48,28 +48,34 @@ enum BridgeError: Error {
   // Background dispatch queue for plugin calls
   public var dispatchQueue = DispatchQueue(label: "bridge")
 
-  public var notificationsDelegate : CAPUNUserNotificationCenterDelegate
+  public var notificationsDelegate: CAPUNUserNotificationCenterDelegate
 
-  public init(_ bridgeDelegate: CAPBridgeDelegate, _ userContentController: WKUserContentController, _ config: CAPConfig, _ scheme: String) {
+  public init(_ bridgeDelegate: CAPBridgeDelegate, _ messageHandlerWrapper: CAPMessageHandlerWrapper, _ config: CAPConfig, _ scheme: String) {
     self.bridgeDelegate = bridgeDelegate
-    self.userContentController = userContentController
+    self.messageHandlerWrapper = messageHandlerWrapper
     self.notificationsDelegate = CAPUNUserNotificationCenterDelegate()
     self.config = config
     self.scheme = scheme
 
     super.init()
 
-    self.notificationsDelegate.bridge = self;
+    self.messageHandlerWrapper.bridge = self
+    self.notificationsDelegate.bridge = self
     localUrl = "\(self.scheme)://\(config.getString("server.hostname") ?? "localhost")"
     exportCoreJS(localUrl: localUrl!)
     registerPlugins()
     setupCordovaCompatibility()
     bindObservers()
-    NotificationCenter.default.addObserver(forName: CAPBridge.tmpVCAppeared.name, object: .none, queue: .none) { _ in
-      self.tmpWindow = nil
+    NotificationCenter.default.addObserver(forName: CAPBridge.tmpVCAppeared.name, object: .none, queue: .none) { [weak self] _ in
+      self?.tmpWindow = nil
     }
   }
-  
+
+  deinit {
+    // the message handler needs to removed to avoid any retain cycles
+    messageHandlerWrapper.cleanUp()
+  }
+
   public func setStatusBarVisible(_ isStatusBarVisible: Bool) {
     guard let bridgeVC = self.viewController as? CAPBridgeViewController else {
       return
@@ -78,7 +84,7 @@ enum BridgeError: Error {
       bridgeVC.setStatusBarVisible(isStatusBarVisible)
     }
   }
-  
+
   public func setStatusBarStyle(_ statusBarStyle: UIStatusBarStyle) {
     guard let bridgeVC = self.viewController as? CAPBridgeViewController else {
       return
@@ -103,7 +109,7 @@ enum BridgeError: Error {
     }
     return !bridgeVC.prefersStatusBarHidden
   }
-    
+
   public func getStatusBarStyle() -> UIStatusBarStyle {
     guard let bridgeVC = self.viewController as? CAPBridgeViewController else {
       return UIStatusBarStyle.default
@@ -118,18 +124,18 @@ enum BridgeError: Error {
     }
     return bridgeVC.traitCollection.userInterfaceStyle
   }
-  
+
   /**
    * Get the last URL that triggered an open or continue activity event.
    */
   public static func getLastUrl() -> URL? {
     return lastUrl
   }
-  
+
   /**
    * Handle an openUrl action and dispatch a notification.
    */
-  public static func handleOpenUrl(_ url: URL, _ options: [UIApplication.OpenURLOptionsKey : Any]) -> Bool {
+  public static func handleOpenUrl(_ url: URL, _ options: [UIApplication.OpenURLOptionsKey: Any]) -> Bool {
     NotificationCenter.default.post(name: Notification.Name(CAPNotifications.URLOpen.name()), object: [
       "url": url,
       "options": options
@@ -138,7 +144,7 @@ enum BridgeError: Error {
     CAPBridge.lastUrl = url
     return true
   }
-  
+
   /**
    * Handle continueUserActivity, for now this just provides universal link responding support.
    */
@@ -147,7 +153,7 @@ enum BridgeError: Error {
     if userActivity.activityType != NSUserActivityTypeBrowsingWeb || userActivity.webpageURL == nil {
       return false
     }
-    
+
     let url = userActivity.webpageURL
     CAPBridge.lastUrl = url
     NotificationCenter.default.post(name: Notification.Name(CAPNotifications.UniversalLinkOpen.name()), object: [
@@ -155,11 +161,11 @@ enum BridgeError: Error {
     ])
     return true
   }
-  
+
   public static func handleAppBecameActive(_ application: UIApplication) {
     // no-op for now
   }
-  
+
   /**
    * Print a hopefully informative error message to the log when something
    * particularly dreadful happens.
@@ -177,28 +183,32 @@ enum BridgeError: Error {
     default:
       CAPLog.print("⚡️ ❌  Unknown error")
     }
-    
+
     CAPLog.print("⚡️ ❌  Please verify your installation or file an issue")
   }
-  
+
   /**
    * Bind notification center observers to watch for app active/inactive status
    */
   func bindObservers() {
     let appStatePlugin = getOrLoadPlugin(pluginName: "App") as? CAPAppPlugin
-    
-    NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: OperationQueue.main) { (notification) in
+
+    NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: OperationQueue.main) { [weak self, weak appStatePlugin] (_) in
       CAPLog.print("APP ACTIVE")
-      self.isActive = true
-      appStatePlugin?.fireChange(isActive: self.isActive)
+      self?.isActive = true
+      if let strongSelf = self {
+        appStatePlugin?.fireChange(isActive: strongSelf.isActive)
+      }
     }
-    NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: OperationQueue.main) { (notification) in
+    NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: OperationQueue.main) { [weak self, weak appStatePlugin] (_) in
       CAPLog.print("APP INACTIVE")
-      self.isActive = false
-      appStatePlugin?.fireChange(isActive: self.isActive)
+      self?.isActive = false
+      if let strongSelf = self {
+        appStatePlugin?.fireChange(isActive: strongSelf.isActive)
+      }
     }
   }
-  
+
   /**
    * - Returns: whether the app is currently active
    */
@@ -211,8 +221,8 @@ enum BridgeError: Error {
    */
   func exportCoreJS(localUrl: String) {
     do {
-      try JSExport.exportCapacitorGlobalJS(userContentController: self.userContentController, isDebug: isDevMode(), localUrl: localUrl)
-      try JSExport.exportCapacitorJS(userContentController: self.userContentController)
+      try JSExport.exportCapacitorGlobalJS(userContentController: self.messageHandlerWrapper.contentController, isDebug: isDevMode(), localUrl: localUrl)
+      try JSExport.exportCapacitorJS(userContentController: self.messageHandlerWrapper.contentController)
     } catch {
       CAPBridge.fatalError(error, error)
     }
@@ -234,20 +244,20 @@ enum BridgeError: Error {
    */
   func exportCordovaJS() {
     do {
-      try JSExport.exportCordovaJS(userContentController: self.userContentController)
+      try JSExport.exportCordovaJS(userContentController: self.messageHandlerWrapper.contentController)
     } catch {
       CAPBridge.fatalError(error, error)
     }
   }
-  
+
   /**
    * Reset the state of the bridge between navigations to avoid
    * sending data back to the page from a previous page.
    */
   func reset() {
-    storedCalls = [String:CAPPluginCall]()
+    storedCalls = [String: CAPPluginCall]()
   }
-  
+
   /**
    * Register all plugins that have been declared
    */
@@ -281,10 +291,10 @@ enum BridgeError: Error {
   func registerPlugin(_ pluginClassName: String, _ jsName: String, _ pluginType: CAPPlugin.Type) {
     // let bridgeType = pluginType as! CAPBridgedPlugin.Type
     knownPlugins[jsName] = pluginType
-    JSExport.exportJS(userContentController: self.userContentController, pluginClassName: jsName, pluginType: pluginType)
+    JSExport.exportJS(userContentController: self.messageHandlerWrapper.contentController, pluginClassName: jsName, pluginType: pluginType)
     _ = loadPlugin(pluginName: jsName)
   }
-  
+
   /**
    * - parameter pluginId: the ID of the plugin
    * - returns: the plugin, if found
@@ -295,44 +305,44 @@ enum BridgeError: Error {
     }
     return plugin
   }
-  
+
   public func getPlugin(pluginName: String) -> CAPPlugin? {
     return self.plugins[pluginName]
   }
-  
+
   public func loadPlugin(pluginName: String) -> CAPPlugin? {
     guard let pluginType = knownPlugins[pluginName] else {
       CAPLog.print("⚡️  Unable to load plugin \(pluginName). No such module found.")
       return nil
     }
-    
+
     let bridgeType = pluginType as! CAPBridgedPlugin.Type
     let p = pluginType.init(bridge: self, pluginId: bridgeType.pluginId(), pluginName: bridgeType.jsName())
-    p!.load()
+    p.load()
     self.plugins[bridgeType.jsName()] = p
     return p
   }
-  
+
   func savePluginCall(_ call: CAPPluginCall) {
     storedCalls[call.callbackId] = call
   }
-  
+
   @objc public func getSavedCall(_ callbackId: String) -> CAPPluginCall? {
     return storedCalls[callbackId]
   }
-  
+
   @objc public func releaseCall(_ call: CAPPluginCall) {
     storedCalls.removeValue(forKey: call.callbackId)
   }
-  
+
   @objc public func releaseCall(callbackId: String) {
     storedCalls.removeValue(forKey: callbackId)
   }
-  
+
   public func getDispatchQueue() -> DispatchQueue {
     return self.dispatchQueue
   }
-  
+
   func registerCordovaPlugins() {
     guard let bridgeVC = self.viewController as? CAPBridgeViewController else {
         return
@@ -344,12 +354,12 @@ enum BridgeError: Error {
       }
     }
     do {
-      try JSExport.exportCordovaPluginsJS(userContentController: self.userContentController)
+      try JSExport.exportCordovaPluginsJS(userContentController: self.messageHandlerWrapper.contentController)
     } catch {
       CAPBridge.fatalError(error, error)
     }
   }
-  
+
   public func isSimulator() -> Bool {
     var isSimulator = false
     #if arch(i386) || arch(x86_64)
@@ -357,7 +367,7 @@ enum BridgeError: Error {
     #endif
     return isSimulator
   }
-  
+
   public func isDevMode() -> Bool {
     #if DEBUG
       return true
@@ -369,22 +379,22 @@ enum BridgeError: Error {
   public func reload() {
     self.getWebView()?.reload()
   }
-  
+
   public func modulePrint(_ plugin: CAPPlugin, _ items: Any...) {
     let output = items.map { "\($0)" }.joined(separator: " ")
     CAPLog.print("⚡️ ", plugin.pluginId, "-", output)
   }
-  
+
   public func alert(_ title: String, _ message: String, _ buttonTitle: String = "OK") {
     let alert = UIAlertController(title: title, message: message, preferredStyle: UIAlertController.Style.alert)
     alert.addAction(UIAlertAction(title: buttonTitle, style: UIAlertAction.Style.default, handler: nil))
-    self.viewController.present(alert, animated: true, completion: nil)
+    self.viewController?.present(alert, animated: true, completion: nil)
   }
 
   func docLink(_ url: String) -> String {
     return "\(CAPBridge.CAP_SITE)docs/\(url)"
   }
-  
+
   /**
    * Handle a call from JavaScript. First, find the corresponding plugin,
    * construct a selector, and perform that selector on the plugin instance.
@@ -397,8 +407,8 @@ enum BridgeError: Error {
     guard let pluginType = knownPlugins[plugin.getId()] else {
       return
     }
-    
-    var selector: Selector? = nil
+
+    var selector: Selector?
     if call.method == "addListener" || call.method == "removeListener" {
       selector = NSSelectorFromString(call.method + ":")
     } else {
@@ -408,40 +418,40 @@ enum BridgeError: Error {
         CAPLog.print("⚡️  Ensure plugin method exists and uses @objc in its declaration, and has been defined")
         return
       }
-      
+
       //CAPLog.print("\n⚡️  Calling method \"\(call.method)\" on plugin \"\(plugin.getId()!)\"")
-      
+
       selector = method.selector
     }
-    
+
     if !plugin.responds(to: selector) {
-      CAPLog.print("⚡️  Error: Plugin \(plugin.getId()!) does not respond to method call \"\(call.method)\" using selector \"\(selector!)\".")
+      CAPLog.print("⚡️  Error: Plugin \(plugin.getId()) does not respond to method call \"\(call.method)\" using selector \"\(selector!)\".")
       CAPLog.print("⚡️  Ensure plugin method exists, uses @objc in its declaration, and arguments match selector without callbacks in CAP_PLUGIN_METHOD.")
       CAPLog.print("⚡️  Learn more: \(docLink(DocLinks.CAPPluginMethodSelector.rawValue))")
       return
     }
-    
+
     // Create a plugin call object and handle the success/error callbacks
-    dispatchQueue.async {
+    dispatchQueue.async { [weak self] in
       //let startTime = CFAbsoluteTimeGetCurrent()
-      
+
       let pluginCall = CAPPluginCall(callbackId: call.callbackId, options: call.options, success: {(result: CAPPluginCallResult?, pluginCall: CAPPluginCall?) -> Void in
         if result != nil {
-          self.toJs(result: JSResult(call: call, result: result!.data ?? [:]), save: pluginCall?.isSaved ?? false)
+          self?.toJs(result: JSResult(call: call, result: result!.data ?? [:]), save: pluginCall?.isSaved ?? false)
         } else {
-          self.toJs(result: JSResult(call: call, result: [:]), save: pluginCall?.isSaved ?? false)
+          self?.toJs(result: JSResult(call: call, result: [:]), save: pluginCall?.isSaved ?? false)
         }
       }, error: {(error: CAPPluginCallError?) -> Void in
         let description = error?.error?.localizedDescription ?? ""
-        self.toJsError(error: JSResultError(call: call, message: error!.message, errorMessage: description, error: error!.data, code: error!.code))
+        self?.toJsError(error: JSResultError(call: call, message: error!.message, errorMessage: description, error: error!.data, code: error!.code))
       })!
-      
+
       plugin.perform(selector, with: pluginCall)
-      
+
       if pluginCall.isSaved {
-        self.savePluginCall(pluginCall)
+        self?.savePluginCall(pluginCall)
       }
-      
+
       //let timeElapsed = CFAbsoluteTimeGetCurrent() - startTime
       //CAPLog.print("Native call took", timeElapsed)
     }
@@ -471,7 +481,7 @@ enum BridgeError: Error {
       return
     }
   }
-  
+
   /**
    * Send a successful result to the JavaScript layer.
    */
@@ -479,7 +489,7 @@ enum BridgeError: Error {
     do {
       let resultJson = try result.toJson()
       CAPLog.print("⚡️  TO JS", resultJson.prefix(256))
-      
+
       DispatchQueue.main.async {
         self.getWebView()?.evaluateJavaScript("""
           window.Capacitor.fromNative({
@@ -499,13 +509,13 @@ enum BridgeError: Error {
     } catch {
       if let jsError = error as? JSProcessingError {
         let appState = getOrLoadPlugin(pluginName: "App") as! CAPAppPlugin
-        
+
         appState.firePluginError(jsError)
       }
     }
 
   }
-  
+
   /**
    * Send an error result to the JavaScript layer.
    */
@@ -518,33 +528,33 @@ enum BridgeError: Error {
       }
     }
   }
-  
+
   /**
    * Eval JS for a specific plugin.
    */
   @objc public func evalWithPlugin(_ plugin: CAPPlugin, js: String) {
     let wrappedJs = """
-    window.Capacitor.withPlugin('\(plugin.getId()!)', function(plugin) {
-      if(!plugin) { console.error('Unable to execute JS in plugin, no such plugin found for id \(plugin.getId()!)'); }
+    window.Capacitor.withPlugin('\(plugin.getId())', function(plugin) {
+      if(!plugin) { console.error('Unable to execute JS in plugin, no such plugin found for id \(plugin.getId())'); }
       \(js)
     });
     """
-    
+
     DispatchQueue.main.async {
-      self.getWebView()?.evaluateJavaScript(wrappedJs, completionHandler: { (result, error) in
+      self.getWebView()?.evaluateJavaScript(wrappedJs, completionHandler: { (_, error) in
         if error != nil {
           CAPLog.print("⚡️  JS Eval error", error!.localizedDescription)
         }
       })
     }
   }
-  
+
   /**
    * Eval JS in the web view
    */
   @objc public func eval(js: String) {
     DispatchQueue.main.async {
-      self.getWebView()?.evaluateJavaScript(js, completionHandler: { (result, error) in
+      self.getWebView()?.evaluateJavaScript(js, completionHandler: { (_, error) in
         if error != nil {
           CAPLog.print("⚡️  JS Eval error", error!.localizedDescription)
         }
@@ -585,9 +595,9 @@ enum BridgeError: Error {
       }
     }
   }
-  
+
   @objc public func getWebView() -> WKWebView? {
-    return self.bridgeDelegate.bridgedWebView
+    return self.bridgeDelegate?.bridgedWebView
   }
 
   public func getLocalUrl() -> String {
@@ -596,7 +606,7 @@ enum BridgeError: Error {
 
   @objc public func presentVC(_ viewControllerToPresent: UIViewController, animated flag: Bool, completion: (() -> Void)? = nil) {
     if viewControllerToPresent.modalPresentationStyle == .popover {
-      self.viewController.present(viewControllerToPresent, animated: flag, completion: completion)
+      self.viewController?.present(viewControllerToPresent, animated: flag, completion: completion)
     } else {
       self.tmpWindow = UIWindow.init(frame: UIScreen.main.bounds)
       self.tmpWindow!.rootViewController = TmpViewController.init()
@@ -607,7 +617,7 @@ enum BridgeError: Error {
 
   @objc public func dismissVC(animated flag: Bool, completion: (() -> Void)? = nil) {
     if self.tmpWindow == nil {
-      self.viewController.dismiss(animated: flag, completion: completion)
+      self.viewController?.dismiss(animated: flag, completion: completion)
     } else {
       self.tmpWindow!.rootViewController!.dismiss(animated: flag, completion: completion)
       self.tmpWindow = nil
@@ -615,4 +625,3 @@ enum BridgeError: Error {
   }
 
 }
-
